@@ -34,5 +34,5 @@
     "vue"
   ],
   "author": "SPDK NAS Manager Team",
-  "license": "MIT"
+  "license": "AGPL-3.0"
 }

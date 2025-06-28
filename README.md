@@ -1,11 +1,11 @@
 # SPDK NAS Manager
 
-SPDK NAS Manager is a comprehensive storage management platform consisting of a RESTful API backend and a modern web frontend for managing SPDK (Storage Performance Development Kit) components including NVMe-oF subsystems, RAID arrays, and block devices.
+SPDK NAS Manager 是一个综合的存储管理平台，由 RESTful API 后端和现代化 Web 前端组成，用于管理 SPDK (Storage Performance Development Kit) 组件，包括 NVMe-oF 子系统、RAID 阵列、块设备和存储卷管理。
 
-## 🏗️ Architecture
+## 🏗️ 架构
 
-- **🎨 Frontend**: Modern Vue.js 3 + Element Plus web interface (see `webapp/` directory)
-- **⚙️ Backend**: RESTful API server built with Node.js and Express
+- **🎨 前端**: 基于 Vue.js 3 + Element Plus 的现代化 Web 界面 (见 `webapp/` 目录)
+- **⚙️ 后端**: 使用 Node.js 和 Express 构建的 RESTful API 服务器
 
 ## Features
 
