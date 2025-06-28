@@ -1,0 +1,46 @@
+{
+  "name": "spdk-nas-manager",
+  "version": "1.0.0",
+  "description": "SPDK NAS Manager Backend - RESTful API for managing SPDK NVMe-oF, RAID, and bdev components",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "start:socket": "node src/app.js --socket",
+    "dev": "nodemon src/app.js",
+    "dev:socket": "nodemon src/app.js --socket",
+    "test": "jest",
+    "migrate": "node src/database/migrate.js"
+  },
+  "keywords": [
+    "spdk",
+    "nas",
+    "nvme",
+    "raid",
+    "storage",
+    "api"
+  ],
+  "author": "SPDK NAS Manager",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.10.0",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.1.5",
+    "helmet": "^7.1.0",
+    "joi": "^17.11.0",
+    "jsonwebtoken": "^9.0.2",
+    "net": "^1.0.2",
+    "sqlite3": "^5.1.6",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.0",
+    "winston": "^3.11.0",
+    "winston-daily-rotate-file": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "jest": "^29.7.0",
+    "nodemon": "^3.0.2"
+  }
+}
