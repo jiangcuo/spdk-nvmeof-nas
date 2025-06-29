@@ -34,34 +34,7 @@ globalConfig.initialize(cliConfig);
 const app = express();
 const PORT = globalConfig.getPort();
 
-// 安全中间件 - 为Swagger UI配置适当的CSP
-app.use(helmet({
-    contentSecurityPolicy: {
-        directives: {
-            defaultSrc: ["'self'"],
-            styleSrc: ["'self'", "'unsafe-inline'", "https:"],
-            scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
-            imgSrc: ["'self'", "data:", "https:"],
-            fontSrc: ["'self'", "https:", "data:"],
-            connectSrc: ["'self'"],
-            objectSrc: ["'none'"],
-            mediaSrc: ["'self'"],
-            frameSrc: ["'none'"]
-        }
-    }
-}));
 app.use(cors());
-
-// 速率限制
-const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15分钟
-    max: 100, // 每个IP最多100个请求
-    message: {
-        error: 'Too many requests',
-        message: 'Rate limit exceeded. Please try again later.'
-    }
-});
-app.use('/api/', limiter);
 
 // 解析JSON
 app.use(express.json({ limit: '10mb' }));
