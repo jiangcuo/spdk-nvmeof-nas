@@ -25,10 +25,107 @@ class DiskService {
                 this.getDiscoveredNvmeDevices()
             ]);
 
-            // 合并所有磁盘信息
-            const allDisks = [...blockDevices, ...nvmeDevices];
+            // 用于存储所有磁盘的Map，避免重复检测同一物理设备
+            const diskMap = new Map();
             
-            // 整合发现的NVMe设备信息
+            // 添加内核态块设备（包括内核态NVMe）
+            for (const disk of blockDevices) {
+                let key;
+                if (disk.type === 'nvme' && disk.pcie_addr) {
+                    // 内核态NVMe使用PCIe地址作为key和显示名称
+                    key = `nvme_${disk.pcie_addr}`;
+                    disk.display_name = disk.pcie_addr; // 使用PCIe地址作为显示名称
+                    disk.original_name = disk.name; // 保存原始设备名
+                } else {
+                    // 其他设备使用设备路径作为key
+                    key = `device_${disk.device_path}`;
+                    disk.display_name = disk.name; // 保持原名称
+                }
+                diskMap.set(key, disk);
+            }
+            
+            // 添加用户态NVMe设备，避免与内核态重复
+            for (const disk of nvmeDevices) {
+                // 检查是否与内核态设备重复（通过设备路径和序列号）
+                let isDuplicate = false;
+                for (const [existingKey, existingDisk] of diskMap.entries()) {
+                    if (existingDisk.type === 'nvme' && 
+                        existingDisk.device_path === disk.device_path &&
+                        existingDisk.serial === disk.serial &&
+                        existingDisk.model === disk.model) {
+                        logger.debug(`Skipping duplicate user-mode NVMe device ${disk.name} - already exists as kernel-mode device ${existingDisk.display_name}`);
+                        isDuplicate = true;
+                        break;
+                    }
+                }
+                
+                if (!isDuplicate) {
+                    // 尝试从discovered信息中找到对应的设备以获取PCIe地址
+                    const discoveredDevice = nvmeDiscovered.find(nvme => {
+                        // 通过模型和序列号匹配
+                        return nvme.model_number && disk.model && 
+                               nvme.model_number.trim() === disk.model.trim() &&
+                               nvme.serial_number && disk.serial &&
+                               nvme.serial_number.trim() === disk.serial.trim();
+                    });
+                    
+                    let key;
+                    if (discoveredDevice && discoveredDevice.pcie_addr) {
+                        key = `nvme_${discoveredDevice.pcie_addr}`;
+                    } else {
+                        // 如果没有discovered信息，使用设备路径和序列号组合作为key
+                        key = `user_nvme_${disk.device_path}_${disk.serial}`;
+                    }
+                    
+                    disk.display_name = disk.name; // 用户态设备保持原名称
+                    diskMap.set(key, disk);
+                }
+            }
+            
+            // 添加从discovery获取的纯用户态NVMe设备（没有对应的nvme-cli设备）
+            for (const discoveredDevice of nvmeDiscovered) {
+                const pcieAddr = discoveredDevice.pcie_addr;
+                const key = `nvme_${pcieAddr}`;
+                
+                // 检查是否已经存在（内核态或通过nvme-cli获取的用户态）
+                if (!diskMap.has(key)) {
+                    // 创建纯用户态设备记录
+                    const userNvmeDevice = {
+                        name: `nvme_${pcieAddr.replace(/:/g, '_').replace(/\./g, '_')}`, // 生成设备名
+                        display_name: `nvme_${pcieAddr.replace(/:/g, '_').replace(/\./g, '_')}`, // 用户态设备保持设备名
+                        device_path: null, // 用户态设备没有内核设备路径
+                        size: this.formatSize(discoveredDevice.total_capacity_bytes || 0),
+                        size_bytes: discoveredDevice.total_capacity_bytes || 0,
+                        type: 'nvme',
+                        transport: 'nvme',
+                        model: discoveredDevice.model_number ? discoveredDevice.model_number.trim() : 'Unknown',
+                        serial: discoveredDevice.serial_number ? discoveredDevice.serial_number.trim() : 'Unknown',
+                        vendor: 'Unknown',
+                        firmware: discoveredDevice.firmware_version || 'Unknown',
+                        rotational: false,
+                        readonly: false,
+                        removable: false,
+                        hotplug: true,
+                        physical_sector_size: 512, // 默认值
+                        logical_sector_size: 512, // 默认值
+                        partitions: [],
+                        mountpoints: [],
+                        fstype: null,
+                        uuid: null,
+                        part_uuid: null,
+                        kernel_mode: false, // 标记为用户态设备
+                        pcie_addr: pcieAddr // 保存PCIe地址
+                    };
+                    
+                    diskMap.set(key, userNvmeDevice);
+                    logger.debug(`Added pure user-mode NVMe device from discovery: ${pcieAddr}`);
+                }
+            }
+            
+            // 转换为数组
+            const allDisks = Array.from(diskMap.values());
+            
+            // 整合发现的NVMe信息 - 只给用户态设备添加discovery信息
             this.mergeDiscoveredNvmeInfo(allDisks, nvmeDiscovered);
             
             // 添加 SPDK 和挂载状态
@@ -123,8 +220,19 @@ class DiskService {
             mountpoints: [],
             fstype: device.fstype || null,
             uuid: device.uuid || null,
-            part_uuid: device.partuuid || null
+            part_uuid: device.partuuid || null,
+            kernel_mode: true // Mark as kernel mode device
         };
+
+        // Check if this is a kernel-mode NVMe device
+        if (this.isKernelNvmeDevice(device.name, device.tran)) {
+            diskInfo.type = 'nvme';
+            diskInfo.transport = 'nvme';
+            diskInfo.rotational = false; // NVMe devices are always non-rotational
+            
+            // Get PCIe address for kernel-mode NVMe devices
+            diskInfo.pcie_addr = await this.getKernelNvmePcieAddress(device.name);
+        }
 
         // 处理分区
         if (device.children) {
@@ -183,6 +291,7 @@ class DiskService {
             fstype: null,
             uuid: null,
             part_uuid: null,
+            kernel_mode: false, // Mark as user-mode device (from nvme-cli)
             nvme_info: {
                 namespace_id: device.NameSpace,
                 usage: device.UsedBytes,
@@ -287,6 +396,11 @@ class DiskService {
      * 检查设备是否已挂载
      */
     checkIfMounted(disk, mountInfo) {
+        // 用户态设备（device_path 为 null）不会被挂载
+        if (!disk.device_path) {
+            return false;
+        }
+        
         if (disk.mountpoints && disk.mountpoints.length > 0) {
             return true;
         }
@@ -312,6 +426,11 @@ class DiskService {
      * 检查设备是否被 SPDK 使用
      */
     checkIfSpdkBdev(disk, spdkBdevs) {
+        // 对于纯用户态设备（device_path 为 null），不会被 SPDK 直接使用
+        if (!disk.device_path) {
+            return false;
+        }
+        
         for (const bdev of spdkBdevs) {
             // 检查 NVMe 设备
             if (bdev.driver_specific && bdev.driver_specific.nvme) {
@@ -474,25 +593,37 @@ class DiskService {
 
     /**
      * 整合发现的NVMe信息到磁盘列表中
+     * 只为用户态NVMe设备添加discovery信息，内核态设备绝对不添加
      */
     mergeDiscoveredNvmeInfo(disks, discoveredNvme) {
         for (const disk of disks) {
-            if (disk.type === 'nvme') {
-                // 尝试通过设备路径匹配
-                const devicePath = disk.device_path || `/dev/${disk.name}`;
-                
-                // 寻找匹配的发现设备
+            // 只处理用户态NVMe设备
+            if (disk.type === 'nvme' && disk.kernel_mode === false) {
+                // 查找匹配的discovered设备
                 const discovered = discoveredNvme.find(nvme => {
-                    // 通过PCIe地址匹配
-                    if (nvme.pcie_addr && disk.device_path) {
-                        // 从/sys路径中提取PCIe地址进行匹配
-                        return this.matchesPcieAddress(disk, nvme.pcie_addr);
+                    // 方法1: 通过PCIe地址匹配（最准确）
+                    if (nvme.pcie_addr && disk.pcie_addr) {
+                        return nvme.pcie_addr === disk.pcie_addr;
                     }
+                    
+                    // 方法2: 通过模型号和序列号精确匹配
+                    if (nvme.model_number && disk.model && 
+                        nvme.serial_number && disk.serial) {
+                        return nvme.model_number.trim() === disk.model.trim() &&
+                               nvme.serial_number.trim() === disk.serial.trim();
+                    }
+                    
+                    // 方法3: 如果只有模型号匹配（不太准确，谨慎使用）
+                    if (nvme.model_number && disk.model && 
+                        !nvme.serial_number && !disk.serial) {
+                        return nvme.model_number.trim() === disk.model.trim();
+                    }
+                    
                     return false;
                 });
 
                 if (discovered) {
-                    // 合并发现的信息
+                    // 添加发现的信息
                     disk.nvme_discovery_info = {
                         pcie_addr: discovered.pcie_addr,
                         vendor_id: discovered.vendor_id,
@@ -505,14 +636,30 @@ class DiskService {
                         discovery_capacity_bytes: discovered.total_capacity_bytes
                     };
                     
-                    // 更新或补充基本信息
+                    // 更新或补充基本信息（只有在信息缺失时才补充）
                     if (!disk.model && discovered.model_number) {
                         disk.model = discovered.model_number.trim();
                     }
                     if (!disk.serial && discovered.serial_number) {
                         disk.serial = discovered.serial_number.trim();
                     }
+                    if (!disk.firmware && discovered.firmware_version) {
+                        disk.firmware = discovered.firmware_version;
+                    }
+                    
+                    logger.debug(`Merged discovery info for user-mode NVMe device: ${disk.display_name} (${discovered.pcie_addr})`);
+                } else {
+                    logger.debug(`No discovery info found for user-mode NVMe device: ${disk.display_name}`);
                 }
+            }
+            // 明确记录：内核态NVMe设备不添加discovery信息
+            else if (disk.type === 'nvme' && disk.kernel_mode === true) {
+                // 确保内核态设备没有discovery信息
+                if (disk.nvme_discovery_info) {
+                    delete disk.nvme_discovery_info;
+                    logger.debug(`Removed discovery info from kernel-mode NVMe device: ${disk.display_name}`);
+                }
+                logger.debug(`Skipping discovery info for kernel-mode NVMe device: ${disk.display_name}`);
             }
         }
     }
@@ -544,6 +691,92 @@ class DiskService {
         } catch (error) {
             logger.debug('Error matching PCIe address:', error.message);
             return false;
+        }
+    }
+
+    /**
+     * Check if a device is a kernel-mode NVMe device
+     */
+    isKernelNvmeDevice(deviceName, transport) {
+        // Check if device name starts with 'nvme'
+        if (deviceName && deviceName.toLowerCase().startsWith('nvme')) {
+            return true;
+        }
+        
+        // Check if transport is PCIe (common for NVMe)
+        if (transport && transport.toLowerCase() === 'pcie') {
+            return true;
+        }
+        
+        return false;
+    }
+
+    /**
+     * Get PCIe address for kernel-mode NVMe device
+     */
+    async getKernelNvmePcieAddress(deviceName) {
+        try {
+            const { execSync } = require('child_process');
+            
+            // Method 1: Try to read from /sys/block/nvmeXnY/device
+            try {
+                const devicePath = `/sys/block/${deviceName}/device`;
+                const realPath = execSync(`readlink -f ${devicePath}`, { encoding: 'utf8' }).trim();
+                const pcieAddr = realPath.split('/').slice(-1)[0];
+                
+                // Validate PCIe address format (should be like 0000:00:04.0)
+                if (pcieAddr && /^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$/.test(pcieAddr)) {
+                    logger.debug(`Found PCIe address for ${deviceName}: ${pcieAddr}`);
+                    return pcieAddr;
+                }
+            } catch (sysError) {
+                logger.debug(`Method 1 failed for ${deviceName}: ${sysError.message}`);
+            }
+            
+            // Method 2: Try using nvme list command if available 
+            try {
+                const { stdout } = await execAsync('nvme list -o json');
+                const nvmeData = JSON.parse(stdout);
+                
+                if (nvmeData.Devices) {
+                    const devicePath = `/dev/${deviceName}`;
+                    const nvmeDevice = nvmeData.Devices.find(dev => dev.DevicePath === devicePath);
+                    
+                    if (nvmeDevice && nvmeDevice.Transport) {
+                        // Extract PCIe address if available in transport info
+                        const transport = nvmeDevice.Transport;
+                        const pcieMatch = transport.match(/([0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7])/);
+                        if (pcieMatch) {
+                            logger.debug(`Found PCIe address via nvme list for ${deviceName}: ${pcieMatch[1]}`);
+                            return pcieMatch[1];
+                        }
+                    }
+                }
+            } catch (nvmeError) {
+                logger.debug(`Method 2 failed for ${deviceName}: ${nvmeError.message}`);
+            }
+            
+            // Method 3: Try reading from /sys/class/nvme/nvmeX/device
+            try {
+                const nvmeController = deviceName.replace(/n\d+$/, ''); // Remove namespace part
+                const controllerPath = `/sys/class/nvme/${nvmeController}/device`;
+                const realPath = execSync(`readlink -f ${controllerPath}`, { encoding: 'utf8' }).trim();
+                const pcieAddr = realPath.split('/').slice(-1)[0];
+                
+                if (pcieAddr && /^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$/.test(pcieAddr)) {
+                    logger.debug(`Found PCIe address via controller for ${deviceName}: ${pcieAddr}`);
+                    return pcieAddr;
+                }
+            } catch (controllerError) {
+                logger.debug(`Method 3 failed for ${deviceName}: ${controllerError.message}`);
+            }
+            
+            logger.debug(`Could not determine PCIe address for kernel NVMe device ${deviceName}`);
+            return null;
+            
+        } catch (error) {
+            logger.debug(`Error getting PCIe address for ${deviceName}:`, error.message);
+            return null;
         }
     }
 }

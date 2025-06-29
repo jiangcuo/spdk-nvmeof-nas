@@ -127,7 +127,7 @@
         label-width="120px"
       >
         <el-form-item label="BDEV类型" prop="type">
-          <el-select v-model="createForm.type" placeholder="请选择类型" style="width: 100%">
+          <el-select v-model="createForm.type" placeholder="请选择类型" style="width: 100%" @change="onBdevTypeChange">
             <el-option label="AIO" value="aio" />
             <el-option label="NVMe" value="nvme" />
             <el-option label="Malloc" value="malloc" />
@@ -141,11 +141,66 @@
 
         <!-- AIO特定字段 -->
         <template v-if="createForm.type === 'aio'">
-          <el-form-item label="文件路径" prop="filename">
-            <el-input v-model="createForm.filename" placeholder="/path/to/file" />
+          <el-form-item label="文件来源" prop="aio_source_mode">
+            <el-radio-group v-model="createForm.aio_source_mode" @change="onAioSourceModeChange">
+              <el-radio value="disk">从磁盘选择</el-radio>
+              <el-radio value="manual">手动输入路径</el-radio>
+            </el-radio-group>
           </el-form-item>
+
+          <!-- 从磁盘选择 -->
+          <template v-if="createForm.aio_source_mode === 'disk'">
+            <el-form-item label="选择磁盘" prop="selected_disk">
+              <div class="disk-selector-input">
+                <el-input 
+                  v-model="createForm.filename" 
+                  placeholder="点击选择磁盘或分区"
+                  readonly
+                  style="width: 100%"
+                >
+                  <template #append>
+                    <el-button @click="showDiskSelectionDialog" :loading="diskLoading">
+                      <el-icon><Search /></el-icon>
+                      选择磁盘
+                    </el-button>
+                  </template>
+                </el-input>
+              </div>
+            </el-form-item>
+            
+            <!-- 选中设备信息 -->
+            <div v-if="selectedDiskInfo" class="selected-disk-info">
+              <el-card size="small">
+                <template #header>
+                  <span>选中设备信息</span>
+                </template>
+                <el-descriptions :column="2" size="small">
+                  <el-descriptions-item label="设备路径">{{ selectedDiskInfo.device_path }}</el-descriptions-item>
+                  <el-descriptions-item label="容量">{{ selectedDiskInfo.size }}</el-descriptions-item>
+                  <el-descriptions-item label="物理扇区大小">{{ selectedDiskInfo.physical_sector_size }} 字节</el-descriptions-item>
+                  <el-descriptions-item label="逻辑扇区大小">{{ selectedDiskInfo.logical_sector_size }} 字节</el-descriptions-item>
+                </el-descriptions>
+              </el-card>
+            </div>
+          </template>
+
+          <!-- 手动输入路径 -->
+          <el-form-item v-if="createForm.aio_source_mode === 'manual'" label="文件路径" prop="filename">
+            <el-input v-model="createForm.filename" placeholder="/dev/sda 或 /path/to/file" />
+          </el-form-item>
+
           <el-form-item label="块大小" prop="block_size">
-            <el-input-number v-model="createForm.block_size" :min="512" :step="512" />
+            <el-input-number 
+              v-model="createForm.block_size" 
+              :min="512" 
+              :step="512"
+              :placeholder="suggestedBlockSize ? `建议: ${suggestedBlockSize}` : ''"
+            />
+            <div v-if="suggestedBlockSize" class="form-help">
+              <el-text size="small" type="info">
+                建议块大小: {{ suggestedBlockSize }} 字节（基于设备扇区大小）
+              </el-text>
+            </div>
           </el-form-item>
         </template>
 
@@ -300,6 +355,112 @@
         </div>
       </div>
     </el-dialog>
+
+    <!-- 磁盘选择弹窗 -->
+    <el-dialog
+      v-model="diskSelectionVisible"
+      title="选择磁盘或分区"
+      width="800px"
+      :close-on-click-modal="false"
+    >
+      <div class="disk-selection-content">
+        <div class="disk-selection-header">
+          <el-button 
+            type="primary" 
+            :loading="diskLoading" 
+            @click="loadDisks"
+            size="small"
+          >
+            <el-icon><Refresh /></el-icon>
+            刷新磁盘列表
+          </el-button>
+          <el-text size="small" type="info">选择可用的磁盘或分区作为AIO BDEV的存储设备</el-text>
+        </div>
+
+        <div v-if="availableDisks.length > 0" class="disk-list">
+          <div 
+            v-for="disk in availableDisks" 
+            :key="disk.name" 
+            class="disk-group"
+          >
+            <!-- 磁盘主条目 -->
+            <div 
+              class="disk-row"
+              :class="{ 'selected': createForm.selected_disk === disk.device_path }"
+              @click="selectDiskInDialog(disk, null)"
+            >
+              <el-icon class="device-icon disk">
+                <Box />
+              </el-icon>
+              <div class="device-info">
+                <div class="device-name-section">
+                  <span class="device-name">{{ disk.display_name || disk.name }}</span>
+                  <el-tag 
+                    v-if="disk.type === 'nvme'" 
+                    :type="disk.kernel_mode ? 'success' : 'warning'" 
+                    size="small" 
+                    class="device-mode-tag"
+                  >
+                    {{ disk.kernel_mode ? '内核态' : '用户态' }}
+                  </el-tag>
+                  <el-tooltip 
+                    v-if="disk.original_name && disk.original_name !== (disk.display_name || disk.name)"
+                    :content="`原始设备名: ${disk.original_name}`"
+                    placement="top"
+                  >
+                    <el-tag type="info" size="small" class="original-name-tag">
+                      {{ disk.original_name }}
+                    </el-tag>
+                  </el-tooltip>
+                </div>
+                <span class="device-size">{{ disk.size }}</span>
+                <span class="device-model">{{ disk.model }}</span>
+                <span class="device-sector">{{ disk.physical_sector_size }}字节扇区</span>
+                <span v-if="disk.pcie_addr" class="device-pcie">{{ disk.pcie_addr }}</span>
+              </div>
+              <div class="device-path">{{ disk.device_path }}</div>
+            </div>
+            
+            <!-- 分区列表 -->
+            <div 
+              v-for="partition in disk.partitions" 
+              :key="partition.name"
+              class="partition-row"
+              :class="{ 'selected': createForm.selected_disk === partition.device_path }"
+              @click="selectDiskInDialog(disk, partition)"
+            >
+              <el-icon class="device-icon partition">
+                <Box />
+              </el-icon>
+              <div class="device-info">
+                <div class="device-name-section">
+                  <span class="device-name">├─ {{ partition.name }}</span>
+                </div>
+                <span class="device-size">{{ partition.size }}</span>
+                <span v-if="partition.fstype" class="device-fs">{{ partition.fstype }}</span>
+                <span v-if="partition.mountpoint" class="device-mount">{{ partition.mountpoint }}</span>
+              </div>
+              <div class="device-path">{{ partition.device_path }}</div>
+            </div>
+          </div>
+        </div>
+        
+        <el-empty v-else description="暂无可用磁盘" />
+      </div>
+      
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="diskSelectionVisible = false">取消</el-button>
+          <el-button 
+            type="primary" 
+            @click="confirmDiskSelection"
+            :disabled="!createForm.selected_disk"
+          >
+            确认选择
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -324,14 +485,18 @@ const userStore = useUserStore()
 const loading = ref(false)
 const createLoading = ref(false)
 const nvmeLoading = ref(false)
+const diskLoading = ref(false)
 const bdevs = ref([])
 const selectedBdev = ref(null)
 const discoveredDevices = ref([])
 const selectedDeviceInfo = ref(null)
+const disks = ref([])
+const selectedDiskInfo = ref(null)
 
 // 对话框状态
 const createVisible = ref(false)
 const detailsVisible = ref(false)
+const diskSelectionVisible = ref(false)
 
 // 表单数据
 const createFormRef = ref()
@@ -343,18 +508,36 @@ const createForm = ref({
   size: 100,
   block_size: 4096,
   device_selection_mode: 'discovered',
-  selected_device: ''
+  selected_device: '',
+  aio_source_mode: 'disk',
+  selected_disk: ''
 })
 
 // 表单验证规则
-const createRules = {
-  type: [{ required: true, message: '请选择BDEV类型', trigger: 'change' }],
-  name: [{ required: true, message: '请输入BDEV名称', trigger: 'blur' }],
-  filename: [{ required: true, message: '请输入文件路径', trigger: 'blur' }],
-  traddr: [{ required: true, message: '请输入PCI地址', trigger: 'blur' }],
-  size: [{ required: true, message: '请输入大小', trigger: 'blur' }],
-  selected_device: [{ required: true, message: '请选择设备', trigger: 'change' }]
-}
+const createRules = computed(() => {
+  const rules = {
+    type: [{ required: true, message: '请选择BDEV类型', trigger: 'change' }],
+    name: [{ required: true, message: '请输入BDEV名称', trigger: 'blur' }],
+    size: [{ required: true, message: '请输入大小', trigger: 'blur' }],
+  }
+  
+  // 根据BDEV类型添加特定验证规则
+  if (createForm.value.type === 'aio') {
+    if (createForm.value.aio_source_mode === 'disk') {
+      rules.selected_disk = [{ required: true, message: '请选择磁盘', trigger: 'change' }]
+    } else {
+      rules.filename = [{ required: true, message: '请输入文件路径', trigger: 'blur' }]
+    }
+  } else if (createForm.value.type === 'nvme') {
+    if (createForm.value.device_selection_mode === 'discovered') {
+      rules.selected_device = [{ required: true, message: '请选择设备', trigger: 'change' }]
+    } else {
+      rules.traddr = [{ required: true, message: '请输入PCI地址', trigger: 'blur' }]
+    }
+  }
+  
+  return rules
+})
 
 // 筛选状态
 const searchText = ref('')
@@ -388,6 +571,40 @@ const filteredBdevs = computed(() => {
   console.log('📊 BDEV数量:', filtered.length)
   
   return filtered
+})
+
+// 可用磁盘（过滤掉已挂载、只读、已被SPDK使用的磁盘）
+const availableDisks = computed(() => {
+  return disks.value.filter(disk => {
+    // 过滤条件：
+    // 1. 不是只读的
+    // 2. 没有被挂载
+    // 3. 没有被SPDK使用
+    return !disk.readonly && !disk.is_mounted && !disk.is_spdk_bdev
+  })
+})
+
+// 建议的块大小（基于选中的磁盘/分区）
+const suggestedBlockSize = computed(() => {
+  if (!selectedDiskInfo.value) return null
+  
+  // 使用物理扇区大小作为建议块大小
+  const sectorSize = selectedDiskInfo.value.physical_sector_size
+  if (sectorSize && typeof sectorSize === 'string') {
+    // 提取数字部分，假设格式为 "4096 bytes" 或 "4096"
+    const match = sectorSize.match(/(\d+)/)
+    if (match) {
+      return parseInt(match[1])
+    }
+  }
+  
+  // 如果是数字类型，直接返回
+  if (typeof sectorSize === 'number') {
+    return sectorSize
+  }
+  
+  // 默认返回4096
+  return 4096
 })
 
 // 工具函数
@@ -529,6 +746,154 @@ const loadBdevs = async () => {
   }
 }
 
+// 加载磁盘列表
+const loadDisks = async () => {
+  try {
+    diskLoading.value = true
+    const response = await ApiService.disks.getAll()
+    console.log('磁盘API响应:', response)
+    
+    const apiData = response.data
+    if (apiData.success && apiData.data && Array.isArray(apiData.data.disks)) {
+      disks.value = apiData.data.disks
+      console.log('成功加载磁盘数据:', disks.value.length, '个磁盘')
+    } else {
+      disks.value = []
+    }
+  } catch (error) {
+    console.error('加载磁盘列表失败:', error)
+    ElMessage.error('加载磁盘列表失败')
+    disks.value = []
+  } finally {
+    diskLoading.value = false
+  }
+}
+
+// 选择磁盘或分区
+const selectDisk = (disk, partition) => {
+  if (partition) {
+    // 选择分区
+    createForm.value.selected_disk = partition.device_path
+    createForm.value.filename = partition.device_path
+    selectedDiskInfo.value = {
+      device_path: partition.device_path,
+      size: partition.size,
+      physical_sector_size: disk.physical_sector_size,
+      logical_sector_size: disk.logical_sector_size,
+      name: partition.name,
+      type: 'partition'
+    }
+  } else {
+    // 选择整个磁盘
+    createForm.value.selected_disk = disk.device_path
+    createForm.value.filename = disk.device_path
+    selectedDiskInfo.value = {
+      device_path: disk.device_path,
+      size: disk.size,
+      physical_sector_size: disk.physical_sector_size,
+      logical_sector_size: disk.logical_sector_size,
+      name: disk.name,
+      type: 'disk'
+    }
+  }
+  
+  // 自动设置建议的块大小
+  const suggested = suggestedBlockSize.value
+  if (suggested && suggested !== createForm.value.block_size) {
+    createForm.value.block_size = suggested
+  }
+  
+  console.log('选择了设备:', selectedDiskInfo.value)
+}
+
+// 显示磁盘选择弹窗
+const showDiskSelectionDialog = async () => {
+  // 如果磁盘列表为空，先加载
+  if (disks.value.length === 0) {
+    await loadDisks()
+  }
+  diskSelectionVisible.value = true
+}
+
+// 在弹窗中选择磁盘或分区（临时选择，不立即应用）
+const selectDiskInDialog = (disk, partition) => {
+  if (partition) {
+    // 选择分区
+    createForm.value.selected_disk = partition.device_path
+  } else {
+    // 选择整个磁盘
+    createForm.value.selected_disk = disk.device_path
+  }
+}
+
+// 确认磁盘选择
+const confirmDiskSelection = () => {
+  // 找到选中的磁盘/分区并应用到表单
+  const selectedPath = createForm.value.selected_disk
+  
+  for (const disk of availableDisks.value) {
+    // 检查是否选择了整个磁盘
+    if (disk.device_path === selectedPath) {
+      selectDisk(disk, null)
+      break
+    }
+    
+    // 检查是否选择了分区
+    if (disk.partitions) {
+      const partition = disk.partitions.find(p => p.device_path === selectedPath)
+      if (partition) {
+        selectDisk(disk, partition)
+        break
+      }
+    }
+  }
+  
+  diskSelectionVisible.value = false
+}
+
+// AIO源模式切换
+const onAioSourceModeChange = (mode) => {
+  // 清除之前的选择
+  createForm.value.selected_disk = ''
+  createForm.value.filename = ''
+  selectedDiskInfo.value = null
+  
+  if (mode === 'disk') {
+    // 如果切换到磁盘选择模式，自动加载磁盘列表
+    if (disks.value.length === 0) {
+      loadDisks()
+    }
+  }
+}
+
+// BDEV类型切换处理
+const onBdevTypeChange = (type) => {
+  // 清除所有特定类型的字段
+  createForm.value.filename = ''
+  createForm.value.selected_disk = ''
+  createForm.value.traddr = ''
+  createForm.value.selected_device = ''
+  
+  // 重置相关的信息
+  selectedDiskInfo.value = null
+  selectedDeviceInfo.value = null
+  
+  // 设置默认值
+  if (type === 'aio') {
+    createForm.value.aio_source_mode = 'disk'
+    createForm.value.block_size = 4096
+    // 如果需要，自动加载磁盘列表
+    if (disks.value.length === 0) {
+      loadDisks()
+    }
+  } else if (type === 'nvme') {
+    createForm.value.device_selection_mode = 'discovered'
+  } else if (type === 'malloc' || type === 'null') {
+    createForm.value.size = 100
+    createForm.value.block_size = 4096
+  }
+}
+
 const refreshBdevs = async () => {
   loading.value = true
   try {
@@ -543,6 +908,16 @@ const refreshBdevs = async () => {
 
 // BDEV操作
 const showCreateDialog = () => {
+  resetCreateForm()
+  createVisible.value = true
+  
+  // 如果磁盘列表为空，自动加载
+  if (disks.value.length === 0) {
+    loadDisks()
+  }
+}
+
+const resetCreateForm = () => {
   createForm.value = {
     type: '',
     name: '',
@@ -551,9 +926,14 @@ const showCreateDialog = () => {
     size: 100,
     block_size: 4096,
     device_selection_mode: 'discovered',
-    selected_device: ''
+    selected_device: '',
+    aio_source_mode: 'disk',
+    selected_disk: ''
   }
-  createVisible.value = true
+  selectedDeviceInfo.value = null
+  selectedDiskInfo.value = null
+  discoveredDevices.value = []
+  diskSelectionVisible.value = false
 }
 
 // NVMe设备发现相关方法
@@ -629,9 +1009,19 @@ const createBdev = async () => {
     
     switch (formData.type) {
       case 'aio':
+        // 确保filename字段已设置
+        let filename = formData.filename
+        if (formData.aio_source_mode === 'disk' && formData.selected_disk) {
+          filename = formData.selected_disk
+        }
+        
+        if (!filename) {
+          throw new Error('请选择磁盘或输入文件路径')
+        }
+        
         response = await ApiService.bdevs.createAio({
           name: formData.name,
-          filename: formData.filename,
+          filename: filename,
           block_size: formData.block_size
         })
         break
@@ -658,6 +1048,7 @@ const createBdev = async () => {
     
     ElMessage.success('BDEV创建成功')
     createVisible.value = false
+    resetCreateForm()
     await refreshBdevs()
   } catch (error) {
     console.error('创建BDEV失败:', error)
@@ -685,12 +1076,21 @@ const showBdevDetails = (bdev) => {
 // 组件挂载
 onMounted(async () => {
   await refreshBdevs()
+  
+  // 预加载磁盘列表，用于AIO类型的磁盘选择
+  try {
+    await loadDisks()
+  } catch (error) {
+    console.warn('预加载磁盘列表失败:', error)
+  }
+  
   console.log('💾 BDEV管理页面已加载')
   
   // 调试计算属性
   console.log('🔍 BDEV调试信息:')
   console.log('bdevs.value:', bdevs.value)
   console.log('filteredBdevs.value:', filteredBdevs.value)
+  console.log('availableDisks.value:', availableDisks.value)
 })
 </script>
 
@@ -773,6 +1173,194 @@ onMounted(async () => {
   margin-top: 8px;
 }
 
+/* 磁盘选择器样式 */
+.disk-selector-input {
+  width: 100%;
+}
+
+/* 磁盘选择弹窗样式 */
+.disk-selection-content {
+  max-height: 500px;
+  overflow-y: auto;
+}
+
+.disk-selection-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--el-border-color-light);
+}
+
+.disk-list {
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.disk-group:not(:last-child) {
+  border-bottom: 1px solid var(--el-border-color-extra-light);
+}
+
+.disk-row, .partition-row {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  padding: 12px 16px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border-left: 3px solid transparent;
+  min-height: 48px;
+  gap: 12px;
+  width: 100%;
+}
+
+.disk-row:hover, .partition-row:hover {
+  background: var(--el-fill-color-light);
+}
+
+.disk-row.selected, .partition-row.selected {
+  background: var(--el-color-primary-light-9);
+  border-left-color: var(--el-color-primary);
+}
+
+.partition-row {
+  background: var(--el-fill-color-extra-light);
+  padding-left: 44px;
+}
+
+.device-icon {
+  margin-right: 0;
+  font-size: 16px;
+  flex-shrink: 0;
+  width: 20px;
+  text-align: center;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+}
+
+.device-icon.disk {
+  color: var(--el-color-primary);
+}
+
+.device-icon.partition {
+  color: var(--el-color-warning);
+}
+
+.device-info {
+  flex: 1;
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  gap: 12px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.device-info > * {
+  display: inline-block !important;
+  vertical-align: middle !important;
+}
+
+.device-name {
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  white-space: nowrap;
+  min-width: 100px;
+  flex-shrink: 0;
+}
+
+.device-name-section {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px;
+  min-width: 140px;
+  flex-shrink: 0;
+}
+
+.device-mode-tag {
+  font-weight: 500;
+  font-size: 10px;
+  height: 18px;
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: 9px;
+}
+
+.device-size {
+  color: var(--el-color-primary);
+  font-weight: 500;
+  font-size: 13px;
+  white-space: nowrap;
+  min-width: 50px;
+  flex-shrink: 0;
+}
+
+.device-model {
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 100px;
+}
+
+.device-sector {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.device-pcie {
+  color: var(--el-color-info);
+  font-size: 11px;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  background: var(--el-fill-color-extra-light);
+  padding: 2px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+
+.device-fs {
+  color: var(--el-color-success);
+  font-size: 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 40px;
+}
+
+.device-mount {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 80px;
+}
+
+.device-path {
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  background: var(--el-fill-color-extra-light);
+  padding: 4px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 100px;
+}
+
+.selected-disk-info {
+  margin-top: 12px;
+}
+
 /* 响应式设计 */
 @media (max-width: 768px) {
   .table-controls {
@@ -784,5 +1372,44 @@ onMounted(async () => {
   .button-group {
     justify-content: center;
   }
+  
+  .disk-selection-header {
+    flex-direction: column;
+    gap: 8px;
+    align-items: stretch;
+  }
+  
+  .device-info {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+  
+  .device-model {
+    max-width: none;
+  }
+  
+  .device-mount {
+    max-width: none;
+  }
+  
+  .disk-row, .partition-row {
+    min-height: auto;
+    padding: 12px 16px;
+  }
+  
+  .partition-row {
+    padding-left: 24px;
+  }
+}
+
+.original-name-tag {
+  font-weight: 400;
+  font-size: 9px;
+  height: 16px;
+  line-height: 14px;
+  padding: 0 4px;
+  border-radius: 8px;
+  margin-left: 4px;
 }
 </style> 

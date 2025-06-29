@@ -108,17 +108,40 @@
               <el-icon class="device-icon" :color="getDeviceIconColor(row.type)">
                 <component :is="getDeviceIcon(row.type)" />
               </el-icon>
-              <span>{{ row.name }}</span>
+              <span>{{ row.display_name || row.name }}</span>
+              <el-tooltip 
+                v-if="row.original_name && row.original_name !== (row.display_name || row.name)"
+                :content="`原始设备名: ${row.original_name}`"
+                placement="top"
+              >
+                <el-tag type="info" size="small" class="ml-2">
+                  {{ row.original_name }}
+                </el-tag>
+              </el-tooltip>
             </div>
           </template>
         </el-table-column>
 
         <el-table-column prop="model" label="型号" min-width="150" show-overflow-tooltip />
         
+        <el-table-column label="设备模式" width="120">
+          <template #default="{ row }">
+            <div v-if="row.type === 'nvme'" class="device-mode">
+              <el-tag 
+                :type="row.kernel_mode ? 'success' : 'warning'" 
+                size="small"
+              >
+                {{ row.kernel_mode ? '内核态' : '用户态' }}
+              </el-tag>
+            </div>
+            <span v-else class="text-muted">N/A</span>
+          </template>
+        </el-table-column>
+        
         <el-table-column label="PCIe地址" width="130">
           <template #default="{ row }">
-            <span v-if="row.nvme_discovery_info?.pcie_addr" class="pcie-addr">
-              {{ row.nvme_discovery_info.pcie_addr }}
+            <span v-if="row.pcie_addr || row.nvme_discovery_info?.pcie_addr" class="pcie-addr">
+              {{ row.pcie_addr || row.nvme_discovery_info.pcie_addr }}
             </span>
             <span v-else-if="row.type === 'nvme'" class="text-muted">-</span>
             <span v-else class="text-muted">N/A</span>
@@ -165,12 +188,18 @@
     <!-- 磁盘详情对话框 -->
     <el-dialog
       v-model="detailsVisible"
-      :title="`磁盘详情 - ${selectedDisk?.name}`"
+      :title="`磁盘详情 - ${selectedDisk?.display_name || selectedDisk?.name}`"
       width="800px"
     >
       <div v-if="selectedDisk" class="disk-details">
         <el-descriptions :column="2" border>
-          <el-descriptions-item label="设备名称">{{ selectedDisk.name }}</el-descriptions-item>
+          <el-descriptions-item label="设备名称">
+            {{ selectedDisk.display_name || selectedDisk.name }}
+            <el-tag v-if="selectedDisk.original_name && selectedDisk.original_name !== (selectedDisk.display_name || selectedDisk.name)" 
+                    type="info" size="small" class="ml-2">
+              原始: {{ selectedDisk.original_name }}
+            </el-tag>
+          </el-descriptions-item>
           <el-descriptions-item label="设备路径">{{ selectedDisk.device_path }}</el-descriptions-item>
           <el-descriptions-item label="型号">{{ selectedDisk.model }}</el-descriptions-item>
           <el-descriptions-item label="序列号">{{ selectedDisk.serial }}</el-descriptions-item>
@@ -181,6 +210,14 @@
           <el-descriptions-item label="逻辑扇区大小">{{ selectedDisk.logical_sector_size }} bytes</el-descriptions-item>
           <el-descriptions-item label="类型">{{ selectedDisk.type?.toUpperCase() }}</el-descriptions-item>
           <el-descriptions-item label="传输接口">{{ selectedDisk.transport }}</el-descriptions-item>
+          <el-descriptions-item v-if="selectedDisk.type === 'nvme'" label="设备模式">
+            <el-tag :type="selectedDisk.kernel_mode ? 'success' : 'warning'">
+              {{ selectedDisk.kernel_mode ? '内核态' : '用户态' }}
+            </el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item v-if="selectedDisk.pcie_addr || selectedDisk.nvme_discovery_info?.pcie_addr" label="PCIe地址">
+            <code class="pcie-address">{{ selectedDisk.pcie_addr || selectedDisk.nvme_discovery_info.pcie_addr }}</code>
+          </el-descriptions-item>
           <el-descriptions-item label="是否旋转磁盘">
             <el-tag :type="selectedDisk.rotational ? 'warning' : 'success'">
               {{ selectedDisk.rotational ? '是' : '否' }}
@@ -242,8 +279,8 @@
         </div>
 
         <!-- NVMe 发现信息 -->
-        <div v-if="selectedDisk.nvme_discovery_info" class="mt-4">
-          <h4>NVMe 发现信息</h4>
+        <div v-if="selectedDisk.nvme_discovery_info && selectedDisk.type === 'nvme' && selectedDisk.kernel_mode === false" class="mt-4">
+          <h4>NVMe 发现信息（用户态设备）</h4>
           <el-descriptions :column="2" border size="small">
             <el-descriptions-item label="PCIe 地址">{{ selectedDisk.nvme_discovery_info.pcie_addr }}</el-descriptions-item>
             <el-descriptions-item label="厂商 ID">{{ selectedDisk.nvme_discovery_info.vendor_id }}</el-descriptions-item>
@@ -301,95 +338,20 @@ const typeFilter = ref('')
 const enrichedDisks = computed(() => {
   console.log('🔄 正在计算enrichedDisks...')
   console.log('disks.value:', disks.value)
-  console.log('nvmeDevices.value:', nvmeDevices.value)
   
-  // 首先处理现有的磁盘数据
+  // 直接使用后端返回的磁盘数据，后端已经正确处理了内核态/用户态的区分
   const processedDisks = disks.value.map(disk => {
     const detectedType = detectDiskType(disk)
-    const enrichedDisk = {
+    return {
       ...disk,
       type: detectedType // 使用检测到的类型覆盖原始类型
     }
-    
-    // 如果是NVMe设备，尝试匹配发现的NVMe设备信息
-    if (detectedType === 'nvme') {
-      const nvmeDevice = nvmeDevices.value.find(nvme => {
-        // 尝试通过模型号或序列号匹配
-        return nvme.model_number.trim() === disk.model?.trim() ||
-               nvme.serial_number.trim() === disk.serial?.trim()
-      })
-      
-      if (nvmeDevice) {
-        enrichedDisk.nvme_discovery_info = {
-          pcie_addr: nvmeDevice.pcie_addr,
-          vendor_id: nvmeDevice.vendor_id,
-          subsystem_vendor_id: nvmeDevice.subsystem_vendor_id,
-          firmware_version: nvmeDevice.firmware_version,
-          namespace_count: nvmeDevice.namespace_count,
-          max_namespaces: nvmeDevice.max_namespaces,
-          transport_type: nvmeDevice.transport_type,
-          discovery_capacity_bytes: nvmeDevice.total_capacity_bytes,
-          discovery_capacity_gb: nvmeDevice.total_capacity_gb
-        }
-      }
-    }
-    
-    return enrichedDisk
   })
   
-  // 添加discover接口发现但在disks中不存在的NVMe设备
-  const discoveredNvmeDevices = nvmeDevices.value.filter(nvmeDevice => {
-    // 检查这个NVMe设备是否已经在磁盘列表中
-    const existsInDisks = disks.value.some(disk => {
-      return nvmeDevice.model_number.trim() === disk.model?.trim() ||
-             nvmeDevice.serial_number.trim() === disk.serial?.trim()
-    })
-    return !existsInDisks
-  }).map(nvmeDevice => {
-    // 将NVMe发现的设备转换为磁盘格式
-    return {
-      name: `nvme-${nvmeDevice.pcie_addr.replace(/:/g, '-')}`, // 使用PCIe地址作为设备名
-      device_path: `/dev/nvme-${nvmeDevice.pcie_addr}`,
-      size: `${nvmeDevice.total_capacity_gb}G`,
-      size_bytes: nvmeDevice.total_capacity_bytes,
-      type: 'nvme',
-      transport: 'pcie',
-      model: nvmeDevice.model_number.trim(),
-      serial: nvmeDevice.serial_number.trim(),
-      vendor: 'NVMe',
-      rotational: false,
-      readonly: false,
-      removable: false,
-      hotplug: false,
-      physical_sector_size: 512,
-      logical_sector_size: 512,
-      partitions: [],
-      mountpoints: [],
-      fstype: null,
-      uuid: null,
-      part_uuid: null,
-      is_mounted: false,
-      is_spdk_bdev: false,
-      spdk_bdev_info: null,
-      nvme_discovery_info: {
-        pcie_addr: nvmeDevice.pcie_addr,
-        vendor_id: nvmeDevice.vendor_id,
-        subsystem_vendor_id: nvmeDevice.subsystem_vendor_id,
-        firmware_version: nvmeDevice.firmware_version,
-        namespace_count: nvmeDevice.namespace_count,
-        max_namespaces: nvmeDevice.max_namespaces,
-        transport_type: nvmeDevice.transport_type,
-        discovery_capacity_bytes: nvmeDevice.total_capacity_bytes,
-        discovery_capacity_gb: nvmeDevice.total_capacity_gb
-      }
-    }
-  })
+  console.log('📊 enrichedDisks结果:', processedDisks)
+  console.log('📊 其中NVMe设备数量:', processedDisks.filter(d => d.type === 'nvme').length)
   
-  const result = [...processedDisks, ...discoveredNvmeDevices]
-  console.log('📊 enrichedDisks结果:', result)
-  console.log('📊 其中NVMe设备数量:', result.filter(d => d.type === 'nvme').length)
-  
-  return result
+  return processedDisks
 })
 
 const filteredDisks = computed(() => {
@@ -740,16 +702,36 @@ onMounted(async () => {
 }
 
 .text-muted {
-  color: #999;
+  color: var(--el-text-color-secondary);
+  font-style: italic;
+}
+
+.ml-2 {
+  margin-left: 8px;
 }
 
 .pcie-addr {
   font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
   font-size: 12px;
-  color: #409eff;
-  background: #f0f9ff;
+  color: var(--el-color-info);
+  background: var(--el-fill-color-extra-light);
   padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.pcie-address {
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  font-size: 13px;
+  color: var(--el-color-info);
+  background: var(--el-fill-color-extra-light);
+  padding: 4px 8px;
   border-radius: 4px;
+  border: 1px solid var(--el-border-color-light);
+}
+
+.device-mode {
+  display: flex;
+  align-items: center;
 }
 
 .disk-details {

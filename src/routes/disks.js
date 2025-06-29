@@ -64,6 +64,12 @@ const diskService = new DiskService();
  *                   logical_sector_size:
  *                     type: string
  *                     description: Logical sector size
+ *                   kernel_mode:
+ *                     type: boolean
+ *                     description: Whether device is controlled by kernel driver (true) or user-space driver (false)
+ *                   pcie_addr:
+ *                     type: string
+ *                     description: PCIe address for NVMe devices (format like 0000:00:04.0)
  *                   partitions:
  *                     type: array
  *                     description: Disk partitions
@@ -79,6 +85,9 @@ const diskService = new DiskService();
  *                   spdk_bdev_info:
  *                     type: object
  *                     description: SPDK bdev information if applicable
+ *                   nvme_discovery_info:
+ *                     type: object
+ *                     description: NVMe discovery information for user-space devices
  */
 router.get('/',
     authenticateToken,
