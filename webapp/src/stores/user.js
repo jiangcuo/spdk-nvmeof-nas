@@ -120,6 +120,28 @@ export const useUserStore = defineStore('user', () => {
     }
   }
   
+  // 修改密码
+  const changePassword = async (passwordData) => {
+    try {
+      isLoading.value = true
+      
+      const response = await api.put('/auth/change-password', passwordData)
+      
+      ElMessage.success('密码修改成功')
+      
+      return { success: true }
+    } catch (error) {
+      console.error('修改密码失败:', error)
+      
+      const message = error.response?.data?.message || '修改密码失败'
+      ElMessage.error(message)
+      
+      return { success: false, message }
+    } finally {
+      isLoading.value = false
+    }
+  }
+  
   // 初始化认证状态
   const initializeAuth = async () => {
     if (token.value) {
@@ -173,6 +195,7 @@ export const useUserStore = defineStore('user', () => {
     logout,
     fetchUserInfo,
     updateProfile,
+    changePassword,
     initializeAuth,
     hasPermission,
     setAuth,

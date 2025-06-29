@@ -50,7 +50,24 @@ const userSchemas = {
     updateProfile: Joi.object({
         email: Joi.string().email(),
         password: Joi.string().min(6)
-    }).min(1)
+    }).min(1),
+
+    changePassword: Joi.object({
+        currentPassword: Joi.string().required().messages({
+            'any.required': '请输入当前密码',
+            'string.empty': '当前密码不能为空'
+        }),
+        newPassword: Joi.string().min(6).required().messages({
+            'any.required': '请输入新密码',
+            'string.min': '新密码至少需要6个字符',
+            'string.empty': '新密码不能为空'
+        }),
+        confirmPassword: Joi.string().required().valid(Joi.ref('newPassword')).messages({
+            'any.required': '请确认新密码',
+            'any.only': '确认密码与新密码不匹配',
+            'string.empty': '确认密码不能为空'
+        })
+    })
 };
 
 // ========== NQN相关验证模式 ==========

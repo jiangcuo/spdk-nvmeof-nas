@@ -380,6 +380,97 @@ router.put('/profile',
 
 /**
  * @swagger
+ * /api/auth/change-password:
+ *   put:
+ *     summary: Change user password
+ *     tags: [Authentication]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - currentPassword
+ *               - newPassword
+ *               - confirmPassword
+ *             properties:
+ *               currentPassword:
+ *                 type: string
+ *                 description: Current password
+ *               newPassword:
+ *                 type: string
+ *                 minLength: 6
+ *                 description: New password
+ *               confirmPassword:
+ *                 type: string
+ *                 description: Confirm new password
+ *     responses:
+ *       200:
+ *         description: Password changed successfully
+ *       400:
+ *         description: Validation error or current password incorrect
+ *       401:
+ *         description: Unauthorized
+ */
+router.put('/change-password', 
+    authenticateToken,
+    validate(userSchemas.changePassword),
+    auditLog('change_password', 'user'),
+    async (req, res) => {
+        try {
+            const { currentPassword, newPassword } = req.body;
+            
+            // Get current user with password hash
+            const user = await database.get(
+                'SELECT id, password_hash FROM users WHERE id = ?',
+                [req.user.id]
+            );
+            
+            if (!user) {
+                return res.status(404).json({
+                    error: 'User not found',
+                    message: 'User account not found'
+                });
+            }
+            
+            // Verify current password
+            const validPassword = await bcrypt.compare(currentPassword, user.password_hash);
+            if (!validPassword) {
+                return res.status(400).json({
+                    error: 'Invalid current password',
+                    message: '当前密码不正确'
+                });
+            }
+            
+            // Hash new password
+            const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+            
+            // Update password in database
+            await database.run(
+                'UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+                [hashedNewPassword, req.user.id]
+            );
+            
+            logger.info(`Password changed for user: ${req.user.username}`);
+            
+            res.json({
+                message: '密码修改成功'
+            });
+        } catch (error) {
+            logger.error('Change password error:', error);
+            res.status(500).json({
+                error: 'Password change failed',
+                message: '密码修改失败，请稍后重试'
+            });
+        }
+    }
+);
+
+/**
+ * @swagger
  * /api/auth/logout:
  *   post:
  *     summary: User logout (client-side token invalidation)
