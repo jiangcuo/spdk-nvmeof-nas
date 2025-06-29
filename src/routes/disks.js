@@ -452,4 +452,161 @@ router.get('/available',
     }
 );
 
+/**
+ * @swagger
+ * /api/disks/{deviceId}/switch-driver:
+ *   post:
+ *     summary: Switch NVMe device driver (kernel <-> user mode)
+ *     tags: [Physical Disk Management]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: deviceId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Device identifier (name or PCIe address)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - target_driver
+ *             properties:
+ *               target_driver:
+ *                 type: string
+ *                 enum: [nvme, vfio-pci]
+ *                 description: Target driver (nvme for kernel mode, vfio-pci for user mode)
+ *     responses:
+ *       200:
+ *         description: Driver switched successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *                 device_id:
+ *                   type: string
+ *                 pcie_addr:
+ *                   type: string
+ *                 old_driver:
+ *                   type: string
+ *                 new_driver:
+ *                   type: string
+ *       400:
+ *         description: Invalid request
+ *       404:
+ *         description: Device not found
+ */
+router.post('/:deviceId/switch-driver',
+    authenticateToken,
+    requireAdmin,
+    async (req, res) => {
+        try {
+            const { deviceId } = req.params;
+            const { target_driver } = req.body;
+
+            if (!target_driver) {
+                return res.status(400).json({
+                    error: 'Missing required field',
+                    message: 'target_driver is required'
+                });
+            }
+
+            const result = await diskService.switchDriver(deviceId, target_driver);
+
+            logger.info(`Driver switched for device ${deviceId} by ${req.user.username}: ${result.old_driver} -> ${result.new_driver}`);
+
+            res.json(result);
+
+        } catch (error) {
+            if (error.message.includes('not found')) {
+                return res.status(404).json({
+                    error: 'Device not found',
+                    message: error.message
+                });
+            }
+
+            logger.error(`Error switching driver for device ${req.params.deviceId}:`, error);
+            res.status(500).json({
+                error: 'Failed to switch driver',
+                message: error.message
+            });
+        }
+    }
+);
+
+/**
+ * @swagger
+ * /api/disks/{deviceId}/wipe:
+ *   post:
+ *     summary: Wipe disk data (kernel mode devices only)
+ *     tags: [Physical Disk Management]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: deviceId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Device identifier
+ *     responses:
+ *       200:
+ *         description: Disk wiped successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *                 device_id:
+ *                   type: string
+ *                 device_path:
+ *                   type: string
+ *       400:
+ *         description: Invalid request
+ *       404:
+ *         description: Device not found
+ */
+router.post('/:deviceId/wipe',
+    authenticateToken,
+    requireAdmin,
+    async (req, res) => {
+        try {
+            const { deviceId } = req.params;
+
+            const result = await diskService.wipeDisk(deviceId);
+
+            logger.info(`Disk wiped: ${deviceId} by ${req.user.username}`);
+
+            res.json(result);
+
+        } catch (error) {
+            if (error.message.includes('not found')) {
+                return res.status(404).json({
+                    error: 'Device not found',
+                    message: error.message
+                });
+            }
+
+            logger.error(`Error wiping disk ${req.params.deviceId}:`, error);
+            res.status(500).json({
+                error: 'Failed to wipe disk',
+                message: error.message
+            });
+        }
+    }
+);
+
 module.exports = router; 

@@ -173,11 +173,34 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="150" fixed="right">
+        <el-table-column label="操作" width="240" fixed="right">
           <template #default="{ row }">
             <div class="button-group">
+              <!-- 查看详情按钮 -->
               <el-button size="small" @click.stop="showDiskDetails(row)">
                 <el-icon><View /></el-icon>
+              </el-button>
+              
+              <!-- NVMe驱动切换按钮 -->
+              <el-button 
+                v-if="row.type === 'nvme'"
+                size="small" 
+                type="warning"
+                :disabled="row.is_spdk_bdev || row.is_mounted"
+                @click.stop="showDriverSwitchDialog(row)"
+              >
+                {{ row.kernel_mode ? '转用户态' : '转内核态' }}
+              </el-button>
+              
+              <!-- 磁盘清除按钮 (只针对内核态设备) -->
+              <el-button 
+                v-if="row.kernel_mode !== false && row.device_path"
+                size="small" 
+                type="danger"
+                :disabled="row.is_spdk_bdev || row.is_mounted"
+                @click.stop="showWipeDialog(row)"
+              >
+                清除数据
               </el-button>
             </div>
           </template>
@@ -300,11 +323,125 @@
         </div>
       </div>
     </el-dialog>
+
+    <!-- 驱动切换确认对话框 -->
+    <el-dialog
+      v-model="driverSwitchVisible"
+      title="驱动切换确认"
+      width="500px"
+      :close-on-click-modal="false"
+    >
+      <div v-if="selectedDiskForOperation">
+        <el-alert
+          title="危险操作警告"
+          type="warning"
+          :closable="false"
+          show-icon
+        >
+          <p>您即将切换设备 <strong>{{ selectedDiskForOperation.display_name || selectedDiskForOperation.name }}</strong> 的驱动程序：</p>
+          <p>从 <strong>{{ selectedDiskForOperation.kernel_mode ? '内核态(nvme)' : '用户态(vfio-pci)' }}</strong> 
+             切换到 <strong>{{ selectedDiskForOperation.kernel_mode ? '用户态(vfio-pci)' : '内核态(nvme)' }}</strong></p>
+          <p><strong>此操作可能会影响设备的可用性，请谨慎操作！</strong></p>
+        </el-alert>
+
+        <div class="mt-4">
+          <div v-if="verificationCode" class="verification-section">
+            <p class="verification-hint">
+              <el-icon><Warning /></el-icon>
+              为确保操作安全，请输入下方图片中的验证码：
+            </p>
+          </div>
+        </div>
+
+        <div v-if="verificationCode" class="mt-4">
+          <el-form :model="verificationForm" label-width="120px">
+            <el-form-item label="验证码确认">
+              <VerificationCode 
+                ref="verificationCodeRef"
+                v-model="verificationForm.code"
+                @verify="handleVerificationResult"
+              />
+            </el-form-item>
+          </el-form>
+        </div>
+      </div>
+
+      <template #footer>
+        <div>
+          <el-button @click="driverSwitchVisible = false">取消</el-button>
+          <el-button 
+            type="primary" 
+            :loading="driverSwitchLoading"
+            :disabled="!verificationCode || !verificationForm.code"
+            @click="confirmDriverSwitch"
+          >
+            确认切换
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <!-- 磁盘清除确认对话框 -->
+    <el-dialog
+      v-model="wipeVisible"
+      title="磁盘清除确认"
+      width="500px"
+      :close-on-click-modal="false"
+    >
+      <div v-if="selectedDiskForOperation">
+        <el-alert
+          title="极度危险操作警告"
+          type="error"
+          :closable="false"
+          show-icon
+        >
+          <p>您即将清除设备 <strong>{{ selectedDiskForOperation.display_name || selectedDiskForOperation.name }}</strong> 的所有数据：</p>
+          <p>设备路径: <strong>{{ selectedDiskForOperation.device_path }}</strong></p>
+          <p><strong>此操作将永久删除磁盘上的所有数据，包括分区表、文件系统等！</strong></p>
+          <p><strong>此操作不可逆转，请确保您已经备份了重要数据！</strong></p>
+        </el-alert>
+
+        <div class="mt-4">
+          <div v-if="verificationCode" class="verification-section">
+            <p class="verification-hint">
+              <el-icon><Warning /></el-icon>
+              为确保操作安全，请输入下方图片中的验证码：
+            </p>
+          </div>
+        </div>
+
+        <div v-if="verificationCode" class="mt-4">
+          <el-form :model="verificationForm" label-width="120px">
+            <el-form-item label="验证码确认">
+              <VerificationCode 
+                ref="verificationCodeRef"
+                v-model="verificationForm.code"
+                @verify="handleVerificationResult"
+              />
+            </el-form-item>
+          </el-form>
+        </div>
+      </div>
+
+      <template #footer>
+        <div>
+          <el-button @click="wipeVisible = false">取消</el-button>
+          <el-button 
+            type="danger" 
+            :loading="wipeLoading"
+            :disabled="!verificationCode || !verificationForm.code"
+            @click="confirmWipe"
+          >
+            确认清除
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 import { useUserStore } from '@/stores/user'
 import { ApiService } from '@/services/api'
 import { nvmeDiscoveryAPI } from '@/api/nvme-discovery'
@@ -312,9 +449,11 @@ import {
   Refresh, 
   Search,
   View,
-  Cpu
+  Cpu,
+  Warning
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import VerificationCode from '@/components/VerificationCode.vue'
 
 const userStore = useUserStore()
 
@@ -329,6 +468,19 @@ const nvmeDevices = ref([])
 
 // 对话框状态
 const detailsVisible = ref(false)
+const driverSwitchVisible = ref(false)
+const wipeVisible = ref(false)
+const selectedDiskForOperation = ref(null)
+
+// 验证码相关
+const verificationLoading = ref(false)
+const driverSwitchLoading = ref(false)
+const wipeLoading = ref(false)
+const verificationCode = ref(true)
+const verificationCodeRef = ref(null)
+const verificationForm = ref({
+  code: ''
+})
 
 // 筛选状态
 const searchText = ref('')
@@ -588,6 +740,110 @@ const showDiskDetails = (disk) => {
   detailsVisible.value = true
 }
 
+// 驱动切换
+const showDriverSwitchDialog = (disk) => {
+  selectedDiskForOperation.value = disk
+  verificationCode.value = false
+  verificationForm.value.code = ''
+  driverSwitchVisible.value = true
+  // 等待DOM更新后显示验证码
+  nextTick(() => {
+    verificationCode.value = true
+  })
+}
+
+// 磁盘清除
+const showWipeDialog = (disk) => {
+  selectedDiskForOperation.value = disk
+  verificationCode.value = false
+  verificationForm.value.code = ''
+  wipeVisible.value = true
+  // 等待DOM更新后显示验证码
+  nextTick(() => {
+    verificationCode.value = true
+  })
+}
+
+// 处理验证码验证结果
+const handleVerificationResult = (isValid) => {
+  if (isValid) {
+    ElMessage.success('验证码正确')
+  } else {
+    ElMessage.error('验证码错误，请重新输入')
+  }
+}
+
+// 确认驱动切换
+const confirmDriverSwitch = async () => {
+  // 使用验证码组件的验证方法
+  if (!verificationCodeRef.value || !verificationCodeRef.value.verify()) {
+    ElMessage.error('请输入正确的验证码')
+    return
+  }
+
+  driverSwitchLoading.value = true
+  try {
+    const disk = selectedDiskForOperation.value
+    const targetDriver = disk.kernel_mode ? 'vfio-pci' : 'nvme'
+    
+    // 获取PCIe地址，优先使用pcie_addr，然后是nvme_discovery_info中的
+    const pcieAddr = disk.pcie_addr || disk.nvme_discovery_info?.pcie_addr
+    if (!pcieAddr) {
+      throw new Error('无法获取设备的PCIe地址')
+    }
+    
+    const response = await ApiService.disks.switchDriver(
+      pcieAddr, // 使用PCIe地址而不是设备名
+      targetDriver
+    )
+
+    ElMessage.success(response.data.message)
+    driverSwitchVisible.value = false
+    
+    // 刷新磁盘列表
+    await refreshDisks()
+    
+  } catch (error) {
+    ElMessage.error('驱动切换失败: ' + error.message)
+  } finally {
+    driverSwitchLoading.value = false
+  }
+}
+
+// 确认磁盘清除
+const confirmWipe = async () => {
+  // 使用验证码组件的验证方法
+  if (!verificationCodeRef.value || !verificationCodeRef.value.verify()) {
+    ElMessage.error('请输入正确的验证码')
+    return
+  }
+
+  wipeLoading.value = true
+  try {
+    const disk = selectedDiskForOperation.value
+    
+    // 使用设备名而不是设备路径，避免URL中的斜杠问题
+    // 从设备路径中提取设备名，如 /dev/nvme0n1 -> nvme0n1
+    let deviceId = disk.display_name || disk.name
+    if (disk.device_path && disk.device_path.startsWith('/dev/')) {
+      deviceId = disk.device_path.replace('/dev/', '')
+    }
+    
+    const response = await ApiService.disks.wipe(deviceId)
+
+    ElMessage.success(response.data.message)
+    wipeVisible.value = false
+    
+    // 刷新磁盘列表
+    await refreshDisks()
+    
+  } catch (error) {
+    ElMessage.error('磁盘清除失败: ' + error.message)
+  } finally {
+    wipeLoading.value = false
+  }
+}
+
 // 组件挂载
 onMounted(async () => {
   await refreshDisks()
@@ -762,5 +1018,15 @@ onMounted(async () => {
   .button-group {
     justify-content: center;
   }
+}
+
+.verification-section {
+  text-align: center;
+}
+
+.verification-hint {
+  font-size: 14px;
+  color: var(--el-text-color-secondary);
+  margin-bottom: 16px;
 }
 </style> 

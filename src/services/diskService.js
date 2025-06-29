@@ -779,6 +779,269 @@ class DiskService {
             return null;
         }
     }
+
+    /**
+     * Perform the actual driver switch using sysfs
+     */
+    async performDriverSwitch(pcieAddr, currentDriver, targetDriver) {
+        const devicePath = `/sys/bus/pci/devices/${pcieAddr}`;
+        
+        try {
+            // Step 1: Unbind from current driver if bound
+            if (currentDriver) {
+                const unbindPath = `/sys/bus/pci/drivers/${currentDriver}/unbind`;
+                logger.info(`Unbinding ${pcieAddr} from ${currentDriver}`);
+                await execAsync(`echo "${pcieAddr}" > ${unbindPath}`);
+                
+                // Wait for unbind to complete
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+
+            // Step 2: Ensure target driver module is loaded
+            if (targetDriver === 'vfio-pci') {
+                logger.info('Loading vfio-pci module');
+                try {
+                    await execAsync('modprobe vfio-pci');
+                    await execAsync('modprobe vfio');
+                } catch (error) {
+                    logger.warn(`Failed to load vfio modules: ${error.message}`);
+                    // Continue anyway, modules might already be loaded
+                }
+            }
+
+            // Step 3: Set driver_override
+            const overridePath = `${devicePath}/driver_override`;
+            logger.info(`Setting driver_override to ${targetDriver}`);
+            await execAsync(`echo "${targetDriver}" > ${overridePath}`);
+
+            // Step 4: Bind to target driver
+            const bindPath = `/sys/bus/pci/drivers/${targetDriver}/bind`;
+            logger.info(`Binding ${pcieAddr} to ${targetDriver}`);
+            
+            // Check if bind path exists
+            try {
+                await execAsync(`ls ${bindPath}`);
+            } catch (error) {
+                throw new Error(`Driver ${targetDriver} bind path does not exist. Is the driver loaded?`);
+            }
+            
+            // Perform the bind
+            await execAsync(`echo "${pcieAddr}" > ${bindPath}`);
+
+            // Step 5: Wait and verify the switch
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            const newDriver = await this.getCurrentDriver(pcieAddr);
+            
+            logger.info(`After driver switch - Expected: ${targetDriver}, Got: ${newDriver}`);
+            
+            if (newDriver !== targetDriver) {
+                // Try to get more detailed error information
+                let errorDetails = '';
+                try {
+                    const dmesgOutput = await execAsync('dmesg | tail -20');
+                    errorDetails = dmesgOutput.stdout;
+                } catch (e) {
+                    errorDetails = 'Could not retrieve dmesg output';
+                }
+                
+                throw new Error(`Driver switch failed. Expected ${targetDriver}, got ${newDriver}. Recent dmesg: ${errorDetails}`);
+            }
+
+        } catch (error) {
+            logger.error(`Error performing driver switch for ${pcieAddr}:`, error);
+            
+            // Try to restore driver_override if it was changed
+            try {
+                const overridePath = `${devicePath}/driver_override`;
+                await execAsync(`echo "" > ${overridePath}`);
+                logger.info(`Cleared driver_override for ${pcieAddr}`);
+            } catch (restoreError) {
+                logger.warn(`Failed to clear driver_override: ${restoreError.message}`);
+            }
+            
+            throw new Error(`Failed to switch driver: ${error.message}`);
+        }
+    }
+
+    /**
+     * Get current driver for PCIe device
+     */
+    async getCurrentDriver(pcieAddr) {
+        try {
+            const driverPath = `/sys/bus/pci/devices/${pcieAddr}/driver`;
+            const driverLink = await execAsync(`readlink ${driverPath}`);
+            const driverName = path.basename(driverLink.stdout.trim());
+            return driverName;
+        } catch (error) {
+            // If no driver is bound, return null
+            return null;
+        }
+    }
+
+    /**
+     * Wipe disk data (for kernel mode devices only)
+     * @param {string} deviceId - Device identifier (name like 'nvme0n1' or path like '/dev/nvme0n1')
+     */
+    async wipeDisk(deviceId) {
+        try {
+            logger.info(`Looking for device: ${deviceId}`);
+
+            // 如果传入的是设备名（如 nvme0n1），需要查找对应的设备信息
+            const allDisks = await this.getAllDisks();
+            
+            let targetDisk = null;
+            
+            // 首先尝试通过设备名匹配（支持 display_name 和 name）
+            targetDisk = allDisks.find(disk => 
+                disk.name === deviceId || 
+                disk.display_name === deviceId ||
+                (disk.device_path && disk.device_path === `/dev/${deviceId}`) ||
+                disk.device_path === deviceId
+            );
+
+            if (!targetDisk) {
+                throw new Error(`Disk '${deviceId}' not found`);
+            }
+
+            logger.info(`Found target disk:`, {
+                name: targetDisk.name,
+                display_name: targetDisk.display_name,
+                device_path: targetDisk.device_path,
+                kernel_mode: targetDisk.kernel_mode
+            });
+            
+            // Ensure it's a kernel mode device with device path
+            if (!targetDisk.device_path) {
+                throw new Error('Disk wiping is only supported for kernel mode devices with device paths');
+            }
+
+            if (targetDisk.kernel_mode === false) {
+                throw new Error('Cannot wipe user mode devices. Switch to kernel mode first.');
+            }
+
+            // Check if device is mounted
+            if (targetDisk.is_mounted) {
+                throw new Error('Cannot wipe mounted device. Unmount it first.');
+            }
+
+            // Check if device is used by SPDK
+            if (targetDisk.is_spdk_bdev) {
+                throw new Error('Cannot wipe device used by SPDK. Remove BDEV first.');
+            }
+
+            logger.info(`Starting disk wipe for ${deviceId} (${targetDisk.device_path})`);
+
+            // Perform the wipe operation
+            await this.performDiskWipe(targetDisk.device_path);
+
+            logger.info(`Successfully wiped disk ${deviceId}`);
+
+            return {
+                success: true,
+                message: `Disk ${deviceId} has been wiped successfully`,
+                device_id: deviceId,
+                device_path: targetDisk.device_path
+            };
+
+        } catch (error) {
+            logger.error(`Error wiping disk ${deviceId}:`, error);
+            throw error;
+        }
+    }
+
+    /**
+     * Perform the actual disk wipe operation
+     */
+    async performDiskWipe(devicePath) {
+        try {
+            // Method 1: Use dd to write zeros to the beginning of the disk
+            logger.info(`Wiping partition table and filesystem signatures on ${devicePath}`);
+            
+            // Write zeros to the first 1MB (this will destroy partition table, filesystem headers, etc.)
+            await execAsync(`dd if=/dev/zero of=${devicePath} bs=1M count=1 conv=fsync`, {
+                timeout: 30000 // 30 second timeout
+            });
+
+            // Method 2: Use wipefs to remove filesystem signatures
+            logger.info(`Removing filesystem signatures from ${devicePath}`);
+            try {
+                await execAsync(`wipefs -a ${devicePath}`, {
+                    timeout: 30000
+                });
+            } catch (error) {
+                logger.warn(`wipefs failed (might not be installed): ${error.message}`);
+            }
+
+            // Method 3: Use sgdisk to destroy GPT structures if available
+            logger.info(`Destroying GPT structures on ${devicePath}`);
+            try {
+                await execAsync(`sgdisk --zap-all ${devicePath}`, {
+                    timeout: 30000
+                });
+            } catch (error) {
+                logger.warn(`sgdisk failed (might not be installed or device might not have GPT): ${error.message}`);
+            }
+
+            // Force kernel to re-read partition table
+            try {
+                await execAsync(`partprobe ${devicePath}`);
+            } catch (error) {
+                logger.warn(`partprobe failed: ${error.message}`);
+            }
+
+            logger.info(`Disk wipe completed for ${devicePath}`);
+
+        } catch (error) {
+            logger.error(`Error performing disk wipe on ${devicePath}:`, error);
+            throw new Error(`Failed to wipe disk: ${error.message}`);
+        }
+    }
+
+    /**
+     * Switch driver for NVMe device (kernel <-> user mode)
+     * @param {string} pcieAddr - PCIe address (e.g., 0000:00:03.0)
+     * @param {string} targetDriver - Target driver: 'nvme' or 'vfio-pci'
+     */
+    async switchDriver(pcieAddr, targetDriver) {
+        // Validate target driver
+        if (!['nvme', 'vfio-pci'].includes(targetDriver)) {
+            throw new Error('Invalid target driver. Must be "nvme" or "vfio-pci"');
+        }
+
+        // Validate PCIe address format
+        if (!pcieAddr || !pcieAddr.match(/^\d{4}:\d{2}:\d{2}\.\d$/)) {
+            throw new Error('Invalid PCIe address format. Expected format: 0000:00:00.0');
+        }
+
+        try {
+            logger.info(`Switching driver for PCIe device ${pcieAddr} to ${targetDriver}`);
+
+            // Check current driver
+            const currentDriver = await this.getCurrentDriver(pcieAddr);
+            logger.info(`Current driver: ${currentDriver}`);
+
+            if (currentDriver === targetDriver) {
+                throw new Error(`Device is already using driver ${targetDriver}`);
+            }
+
+            // Perform driver switch
+            await this.performDriverSwitch(pcieAddr, currentDriver, targetDriver);
+
+            logger.info(`Successfully switched driver for ${pcieAddr} from ${currentDriver || 'none'} to ${targetDriver}`);
+
+            return {
+                success: true,
+                message: `Driver switched from ${currentDriver || 'none'} to ${targetDriver}`,
+                pcie_addr: pcieAddr,
+                old_driver: currentDriver,
+                new_driver: targetDriver
+            };
+
+        } catch (error) {
+            logger.error(`Error switching driver for ${pcieAddr}:`, error);
+            throw error;
+        }
+    }
 }
 
 module.exports = DiskService; 

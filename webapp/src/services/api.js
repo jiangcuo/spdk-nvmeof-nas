@@ -131,7 +131,13 @@ export class ApiService {
     getInfo: (deviceName) => api.get(`/disks/${deviceName}`),
     getHealth: (deviceName) => api.get(`/disks/${deviceName}/health`),
     getSmart: (deviceName) => api.get(`/disks/${deviceName}/smart`),
-    refreshScan: () => api.post('/disks/scan/refresh')
+    refreshScan: () => api.post('/disks/scan/refresh'),
+    switchDriver: (deviceId, targetDriver) => 
+      api.post(`/disks/${deviceId}/switch-driver`, {
+        target_driver: targetDriver
+      }),
+    wipe: (deviceId) =>
+      api.post(`/disks/${deviceId}/wipe`)
   }
   
   static bdevs = {
