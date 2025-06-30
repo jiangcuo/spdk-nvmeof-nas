@@ -32,9 +32,9 @@ class DiskService {
             for (const disk of blockDevices) {
                 let key;
                 if (disk.type === 'nvme' && disk.pcie_addr) {
-                    // 内核态NVMe使用PCIe地址作为key和显示名称
+                    // 内核态NVMe使用PCIe地址作为key，但显示名称使用原始设备名
                     key = `nvme_${disk.pcie_addr}`;
-                    disk.display_name = disk.pcie_addr; // 使用PCIe地址作为显示名称
+                    disk.display_name = disk.name; // 使用原始设备名（如nvme1n1）
                     disk.original_name = disk.name; // 保存原始设备名
                 } else {
                     // 其他设备使用设备路径作为key
