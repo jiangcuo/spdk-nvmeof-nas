@@ -2,7 +2,7 @@
 
 SPDK NAS Manager 是一个综合的存储管理平台，由 RESTful API 后端和现代化 Web 前端组成，用于管理 SPDK (Storage Performance Development Kit) 组件，包括 NVMe-oF 子系统、RAID 阵列、块设备和存储卷管理。
 
-适配最新的spdk25.04 版本
+适配最新的spdk25.04 版本。本程序需要使用root身份
 
 ## 🏗️ 架构
 
@@ -42,7 +42,11 @@ npm install
 npm run start
 ```
 
+### 注册到systemd
 
+```
+bash scripts/create_systemd.sh
+```
 
 ## 用法
 
